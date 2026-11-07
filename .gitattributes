@@ -1,0 +1,52 @@
+# ===== 默认策略 =====
+# Windows 下不做换行符自动转换，按检出方平台保留
+* text=auto
+
+# ===== 源代码 =====
+*.c        text diff=cpp
+*.cc       text diff=cpp
+*.cpp      text diff=cpp
+*.h        text diff=cpp
+*.hpp      text diff=cpp
+*.inl      text diff=cpp
+*.glsl     text
+*.vert     text
+*.frag     text
+*.geom     text
+*.comp     text
+*.txt      text
+*.md       text
+*.cmake    text
+CMakeLists.txt text
+
+# ===== 脚本 =====
+*.sh       text eol=lf
+*.bat      text eol=crlf
+*.ps1      text eol=crlf
+
+# ===== 资源（二进制，禁止转换/合并） =====
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.bmp      binary
+*.gif      binary
+*.tga      binary
+*.hdr      binary
+*.ico      binary
+*.obj      binary
+*.fbx      binary
+*.dae      binary
+*.gltf     binary
+*.glb      binary
+*.mtl      text
+*.mp3      binary
+*.wav      binary
+*.ogg      binary
+*.ttf      binary
+*.otf      binary
+*.ttc      binary
+*.zip      binary
+*.7z       binary
+
+# ===== 保持 stb 等第三方文件的换行符原样，避免 diff 噪音 =====
+thirdparty/** -text
