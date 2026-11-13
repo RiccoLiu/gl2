@@ -1123,11 +1123,11 @@ glUnmapBuffer(GL_ARRAY_BUFFER);
 
 GLSL内建变量： 
 
-- gl_Position：顶点位置坐标
+- gl_Position：顶点位置坐标 (-1, 1)
 - gl_PointSize: 渲染点(像素)的宽高，需要配合 glEnable(GL_PROGRAM_POINT_SIZE); 使用。
 - gl_VertexID: 正在渲染的顶点ID。 
-- gl_FragColor: 片段着色器的颜色分量。
-- gl_FragCoord: 只读变量 xy 分量是窗口坐标，坐标原点在左下角，z分量是对应片段的深度值。
+- gl_FragColor: 片段着色器的颜色分量。R(0, 1), G(0, 1), B(0, 1), A(0, 1)
+- gl_FragCoord: 只读变量 xy 分量是窗口坐标，坐标原点在左下角，z分量是对应片段的深度值。 深度缓冲默认值域: 0-1
 - - 适用场景: 可以对窗口分屏显示不同的效果，对比效果
 - gl_FrontFacing: bool 变量，判断当前片段是正面还是背面(不能启动面剔除)
 - - 适用场景: 平面的正面和背面贴不同的纹理
@@ -1431,30 +1431,657 @@ glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB, width, height, 0, GL_RGB, GL_UNSIGNED_BY
 
 ## 阴影
 
+阴影大致可以分为定向阴影和万向阴影两种，定向阴影使用帧缓冲配合光空间投影矩阵生成定向深度图，万向阴影使用6个 90度的6个投影矩阵生成环绕360度的立方体深度图。之后片段着色器根据片段在深度图中的位置判断片段是否在阴影中。阴影常见的问题是阴影失真，一般常用阴影偏移来进行优化; 再一个是由于深度度分辨率的原因会导致阴影边缘产生锯齿，常用的优化手段是使用PCF优化。
+
 ### 定向光阴影
+
+定向纹理深度图:
+
+```
+float near_plane = 1.0f, far_plane = 7.5f;
+glm::mat4 projection = glm::ortho(-10.0f, 10.0f, -10.0f, 10.0f, near_plane, far_plane);
+glm::mat4 view = glm::lookAt(lightPos, glm::vec3(0.0f), glm::vec3(0.0, 1.0, 0.0));
+glm::mat4 lightSpaceMatrix = projection * view;
+glm::mat4 model = glm::mat4(1.0f);
+
+depthShader.use();
+depthShader.setMat4("u_LightSpaceMatrix", lightSpaceMatrix);
+depthShader.setMat4("u_Model", model);
+
+glViewport(0, 0, depthMap.shadowWidth, depthMap.shadowHeight);
+glBindFramebuffer(GL_FRAMEBUFFER, depthMap.FBO);
+glClear(GL_DEPTH_BUFFER_BIT);
+glActiveTexture(GL_TEXTURE0);
+glBindTexture(GL_TEXTURE_2D, woodTexture);
+
+renderScene(depthShader, plane, cube);
+
+glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+// reset viewport
+glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
+glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+...
+```
+
+阴影：
+``` shadow_maping.vs
+#version 330 core
+
+layout (location = 0) in vec3 a_Position;
+layout (location = 1) in vec3 a_Normal;
+layout (location = 2) in vec2 a_TexCoords;
+
+uniform mat4 u_Model;
+uniform mat4 u_View;
+uniform mat4 u_Projection;
+
+uniform mat3 u_NormalMatrix;
+uniform mat4 u_LightSpaceMatrix;
+
+out VS_OUT {
+    vec3 FragPos;
+    vec3 Normal;
+    vec2 TexCoords;
+    vec4 FragPosLightSpace;
+} vs_out;
+
+void main() {
+    vs_out.FragPos = vec3(u_Model * vec4(a_Position, 1.0));
+    vs_out.Normal = normalize(u_NormalMatrix * a_Normal);
+    vs_out.TexCoords = a_TexCoords;
+    vs_out.FragPosLightSpace = u_LightSpaceMatrix * vec4(vs_out.FragPos, 1.0);
+
+    gl_Position = u_Projection * u_View * u_Model * vec4(a_Position, 1.0);
+}
+
+```
+
+```
+float GetShadow(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) { 
+    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
+    projCoords = projCoords * 0.5 + 0.5;
+
+    float closestDepth = texture(u_ShadowMap, projCoords.xy).r;
+    float currentDepth = projCoords.z;
+
+    // 过采样: 超过正交视锥的远平面
+    if (projCoords.z > 1.0) {
+        return 0.0;
+    }
+
+    // 阴影偏移优化阴影失真
+    float bias = max(0.05 * (1.0 - dot(normal, lightDir)), 0.005);
+    // float shadow = currentDepth - bias > closestDepth  ? 1.0 : 0.0;
+    // float shadow = currentDepth > closestDepth  ? 1.0 : 0.0;
+
+    // PCF
+    float shadow = 0.0;
+    vec2 texelSize = 1.0 / textureSize(u_ShadowMap, 0);
+    for(int x = -1; x <= 1; ++x)
+    {
+        for(int y = -1; y <= 1; ++y)
+        {
+            float pcfDepth = texture(u_ShadowMap, projCoords.xy + vec2(x, y) * texelSize).r; 
+            shadow += currentDepth - bias > pcfDepth  ? 1.0 : 0.0;        
+        }    
+    }
+    shadow /= 9.0;
+
+    return shadow;
+}
+
+vec3 BlinphPhong() { 
+    vec3 color = texture(u_DiffuseMap, fs_in.TexCoords).rgb;
+    
+    vec3 ambient = u_Light.ambient;
+    
+    vec3 lightDir = normalize(u_Light.position - fs_in.FragPos);
+    float diff = max(dot(lightDir, fs_in.Normal), 0);
+    vec3 diffuse = u_Light.diffuse * diff;
+
+    vec3 viewDir = normalize(u_ViewPos - fs_in.FragPos);
+    vec3 halfward = normalize(viewDir + lightDir);
+    float spec = pow(max(dot(halfward, fs_in.Normal), 0), 64);
+    vec3 specula = u_Light.specular * spec;
+
+    float shadow = GetShadow(fs_in.FragPosLightSpace, fs_in.Normal, lightDir);
+    // float shadow = ShadowCalculation(fs_in.FragPosLightSpace);
+    return (ambient + (1.0 - shadow) * (diffuse + specula)) * color;
+}
+
+void main() {    
+    o_FragColor = vec4(BlinphPhong(), 1.0);
+}
+```
 
 ### 点光源阴影
 
-阴影映射：
+万向立方体深度图：
+
+``` point_shadows_depth.vs
+#version 330 core
+
+layout (location = 0) in vec3 a_Position;
+
+uniform mat4 u_Model;
+
+void main() {
+    gl_Position = u_Model * vec4(a_Position, 1.0);
+}
+```
+
+``` point_shadows_depth.gs
+#version 330 core
+
+layout (triangles) in;
+layout (triangle_strip, max_vertices = 18) out;
+
+uniform mat4 u_ShadowMatrices[6];
+
+out vec4 g_FragPos;
+
+void main() {
+    for (int face = 0; face < 6; face++) {
+        gl_Layer = face; // 指定立方体的面
+        
+        for (int i = 0; i < 3; i++) {
+            g_FragPos = gl_in[i].gl_Position;
+            gl_Position = u_ShadowMatrices[face] * g_FragPos;
+            EmitVertex();
+        } 
+        EndPrimitive();
+    }
+}
+
+```
+``` point_shadows_depth.fs
+
+#version 330 core
+
+uniform vec3 u_LightPos;
+uniform float u_FarPlane;
+
+in vec4 g_FragPos;
+
+void main() {
+    float distance = length(g_FragPos.xyz - u_LightPos);
+    distance = distance / u_FarPlane; // 归一化
+    gl_FragDepth = distance;
+}
+
+```
+
+``` render
+float nearPlane = 1.0f;
+float farPlane  = 25.0f;
+glm::mat4 shadowProj = glm::perspective(glm::radians(90.0f), (float)depthMap.width / (float)depthMap.height, nearPlane, farPlane);
+std::vector<glm::mat4> shadowTransforms;
+shadowTransforms.push_back(shadowProj * glm::lookAt(lightPos, lightPos + glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)));
+shadowTransforms.push_back(shadowProj * glm::lookAt(lightPos, lightPos + glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)));
+shadowTransforms.push_back(shadowProj * glm::lookAt(lightPos, lightPos + glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)));
+shadowTransforms.push_back(shadowProj * glm::lookAt(lightPos, lightPos + glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)));
+shadowTransforms.push_back(shadowProj * glm::lookAt(lightPos, lightPos + glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, -1.0f,  0.0f)));
+shadowTransforms.push_back(shadowProj * glm::lookAt(lightPos, lightPos + glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, -1.0f,  0.0f)));
+
+glViewport(0, 0, depthMap.width, depthMap.height);
+glBindFramebuffer(GL_FRAMEBUFFER, depthMap.FBO);
+glClear(GL_DEPTH_BUFFER_BIT);
+
+depthShader.use();
+for (unsigned int i = 0; i < 6; ++i)
+	depthShader.setMat4("u_ShadowMatrices[" + std::to_string(i) + "]", shadowTransforms[i]);
+depthShader.setFloat("u_FarPlane", farPlane);
+depthShader.setVec3("u_LightPos", lightPos);
+renderScene(depthShader, cube);
+glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
+glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+```
+
+渲染阴影:
+
+``` point_shadows.vs
+#version 330 core
+
+layout (location = 0) in vec3 a_Position;
+layout (location = 1) in vec3 a_Normal;
+layout (location = 2) in vec2 a_TexCoord;
+
+uniform mat4 u_Model;
+uniform mat4 u_View;
+uniform mat4 u_Projection;
+
+uniform bool u_ReverseNormals;
+
+out VS_OUT {
+    vec3 FragPos;
+    vec3 Normal;
+    vec2 TexCoord;
+} vs_out;
+
+void main() {
+    vs_out.FragPos = vec3(u_Model * vec4(a_Position, 1.0));
+    vs_out.TexCoord = a_TexCoord;
+
+    if(u_ReverseNormals)
+        vs_out.Normal = normalize(transpose(inverse(mat3(u_Model))) * (-1.0 * a_Normal));
+    else
+        vs_out.Normal = normalize(transpose(inverse(mat3(u_Model))) * a_Normal);
+
+    gl_Position = u_Projection * u_View * u_Model * vec4(a_Position, 1.0);
+}
+```
+
+``` point_shadows.fs
+
+#version 330 core
+
+uniform sampler2D u_WoodTexture;
+uniform samplerCube u_DepthMap;
+
+uniform vec3 u_ViewPos;
+uniform float u_FarPlane;
+
+struct Light {
+    vec3 position;
+    vec3 ambient;
+    vec3 diffuse;
+    vec3 specular;
+};
+uniform Light u_Light;
+
+in VS_OUT {
+    vec3 FragPos;
+    vec3 Normal;
+    vec2 TexCoord;
+} fs_in;
+
+out vec4 o_FragColor;
+
+vec3 gridSamplingDisk[20] = vec3[]
+(
+   vec3(1, 1,  1), vec3( 1, -1,  1), vec3(-1, -1,  1), vec3(-1, 1,  1), 
+   vec3(1, 1, -1), vec3( 1, -1, -1), vec3(-1, -1, -1), vec3(-1, 1, -1),
+   vec3(1, 1,  0), vec3( 1, -1,  0), vec3(-1, -1,  0), vec3(-1, 1,  0),
+   vec3(1, 0,  1), vec3(-1,  0,  1), vec3( 1,  0, -1), vec3(-1, 0, -1),
+   vec3(0, 1,  1), vec3( 0, -1,  1), vec3( 0, -1, -1), vec3( 0, 1, -1)
+);
 
 
-渲染深度图：
+float GetShadow(vec3 fragPos) {
+    vec3 fragDir = fragPos - u_Light.position;
 
-阴影失真，阴影偏移：
+    float closestDepth = texture(u_DepthMap, fragDir).r;
+    closestDepth *= u_FarPlane;
 
+    float currentDepth = length(fragDir);
 
-过采样：
+    float shadow = 0.0;
 
-点阴影：
+    // 1. 阴影偏移优化阴影失真
+    // float bias = 0.05; // 0.05;
+    // shadow = currentDepth - bias > closestDepth  ? 1.0 : 0.0;
 
-正交投影 vs 透视投影:
+    // 2. PCF 优化阴影边缘锯齿
+    float bias = 0.15;
+    int samples = 20;
+    float viewDistance = length(u_ViewPos - fragPos);
+    float diskRadius = (1.0 + (viewDistance / u_FarPlane)) / 75.0; // 距离越远阴影越柔和，距离越近阴影越锐利
+    for(int i = 0; i < samples; ++i)
+    {
+        float closestDepth = texture(u_DepthMap, fragDir + gridSamplingDisk[i] * diskRadius).r;
+        closestDepth *= u_FarPlane;   // undo mapping [0;1]
+        if(currentDepth - bias > closestDepth)
+            shadow += 1.0;
+    }
+    shadow /= float(samples);
 
-## 法线贴图
+    return shadow;
+}
+
+vec3 BlinphPhong() {
+    vec3 color = texture(u_WoodTexture, fs_in.TexCoord).rgb;
+
+    vec3 ambient = u_Light.ambient;
+
+    vec3 lightDir = normalize(u_Light.position - fs_in.FragPos);
+    float diff = max(dot(lightDir, fs_in.Normal), 0);
+    vec3 diffuse = u_Light.diffuse * diff;
+
+    vec3 viewDir = normalize(u_ViewPos - fs_in.FragPos);
+    vec3 halfward = normalize(viewDir + lightDir);
+    float spec = pow(max(dot(halfward, fs_in.Normal), 0), 64);
+    vec3 specula = u_Light.specular * spec;
+
+    float shadow = GetShadow(fs_in.FragPos);
+    return (ambient + (1.0 - shadow)*(diffuse + specula)) * color;
+}
+
+void main() {
+    // 显示深度图
+    // vec3 fragDir = fs_in.FragPos - u_Light.position;
+    // float closestDepth = texture(u_DepthMap, fragDir).r;
+    // o_FragColor = vec4(vec3(closestDepth), 1.0);
+
+    o_FragColor = vec4(BlinphPhong(), 1.0);
+}
+
+```
+
+## 法线贴图(凹凸贴图)
+
+切线空间：
+
+法线贴图使用2D纹理贴采样，但是由于贴图的位姿随时会变换，法向量一直变换，所以引入切线空间。通过主切线、副切线、法线，来描述切线空间和世界空间的转换。切线空间的原点位于内存中图片的左下角，TBN对应方向为: 右上后, TBN矩阵表示切线空间到世界坐标的变换。参考代码如下：
+
+```
+out VS_OUT {
+    vec3 FragPos;
+    vec2 TexCoord;
+    vec3 TangentFragPos;
+    vec3 TangentLightPos;
+    vec3 TangentViewPos;
+} vs_out;
+
+void main() {
+    mat3 normalMatrix = transpose(inverse(mat3(u_Model)));
+    
+    vec3 T = normalize(normalMatrix * a_Tangent);
+    vec3 N = normalize(normalMatrix * a_Normal);
+
+    T = normalize(T - dot(T, N) * N);  // 保证 T 和 N 向量垂直
+    vec3 B = normalize(cross(N, T));
+
+    mat3 invTBN = transpose(mat3(T, B, N)); // TBN: 切线到世界的变换 invTBN：世界到切线的变换
+
+    vs_out.FragPos = vec3(u_Model * vec4(a_Position, 1.0));
+    vs_out.TexCoord = a_TexCoord;
+    vs_out.TangentFragPos = invTBN * vs_out.FragPos;
+    vs_out.TangentLightPos = invTBN * u_LightPos;
+    vs_out.TangentViewPos = invTBN * u_ViewPos;
+
+    gl_Position = u_Projection * u_View * u_Model * vec4(a_Position, 1.0);
+}
+
+```
+```
+vec3 BlinnPhong() {
+    vec3 normal = normalize(texture(u_NormalMap, fs_in.TexCoord).rgb);
+    normal = normalize(normal * 2.0 - 1.0);  // 法线贴图输入[0, 1], 归一化到:[-1, 1]
+
+    vec3 color = texture(u_DiffuseMap, fs_in.TexCoord).rgb;
+
+    vec3 ambient = u_Light.Ambient * color;
+
+    vec3 lightDir = normalize(fs_in.TangentLightPos - fs_in.TangentFragPos);
+    float diff = max(dot(lightDir, normal), 0);
+    vec3 diffuse = u_Light.Diffuse * diff * color;
+    
+    vec3 viewDir = normalize(fs_in.TangentViewPos - fs_in.TangentFragPos);
+    vec3 halfVector = normalize(viewDir + lightDir);
+
+    float spec = pow(max(dot(halfVector, normal), 0), 32);
+    vec3 specular = u_Light.Specular * spec;
+
+    return ambient + diffuse + specular;
+}
+
+```
+
+!! 使用法线贴图可以使用更少的顶点表现出更加丰富的细节。
 
 ## HDR
 
+HDR 使用 浮点帧缓冲 存储渲染的数据，之后通过色调映射算法对帧缓冲的数据进行高光抑制或者低光增强算法。
+
+浮点帧缓冲:
+```
+glGenFramebuffers(1, &FBO);
+glBindFramebuffer(GL_FRAMEBUFFER, FBO);
+
+glGenTextures(1, &textureID);
+glBindTexture(GL_TEXTURE_2D, textureID);
+glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, NULL); // 使用 16 bit 浮点帧缓冲
+
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, textureID, 0);
+
+glGenRenderbuffers(1, &RBO);
+glBindRenderbuffer(GL_RENDERBUFFER, RBO);
+glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
+glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, RBO);
+
+if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+	std::cout << "ERROR::FRAMEBUFFER:: Framebuffer is not complete!" << std::endl;
+}
+glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+```
+
+色调映射算法：
+
+```
+
+void main() {         
+    const float gamma = 2.2;
+    vec3 hdrColor = texture(u_HDRBuffer, v_TexCoords).rgb;
+    if(u_HDR) {
+        // reinhard: 高光抑制算法
+        // vec3 result = hdrColor / (hdrColor + vec3(1.0));
+        // exposure: 曝光控制算法
+        vec3 result = vec3(1.0) - exp(-hdrColor * u_Exposure);
+        // 最后调整 GAMMA       
+        result = pow(result, vec3(1.0 / gamma));
+        o_FragColor = vec4(result, 1.0);
+    }
+    else
+    {
+        vec3 result = pow(hdrColor, vec3(1.0 / gamma));
+        o_FragColor = vec4(result, 1.0);
+    }
+}
+
+```
+
 ## 泛光
 
+泛光与 HDR 配合的效果比较好，首先在 浮点帧缓冲区渲染数据，然后提取亮度超过阈值的区域作为发光区域， 对发光区域进行高斯模糊，最后将模糊后的结果与原帧缓冲区进行混合。
+
+使用 MRT(多目标渲染) 提取发光区域:
+
+``` extract_hdr_bloom.fs
+#version 330 core
+
+layout (location = 0) out vec4 o_FragColor; 	// 输出 第1个颜色空间
+layout (location = 1) out vec4 o_BloomColor;	// 输出 第2个颜色空间
+
+...
+
+void main() {
+	// 设置 红绿蓝三通道的权重，权重和应该为 1
+	vec3 weight =  vec3(0.2126, 0.7152, 0.0722);
+    float brightness = dot(o_FragColor.rgb, weight);
+    if (brightness > 1.0) {
+        o_BloomColor = vec4(o_FragColor.rgb, 1.0);
+    } else {
+        o_BloomColor = vec4(vec3(0.0), 1.0);
+    }
+}
+
+```
+
+``` bloom.cpp
+BloomBuffer(unsigned int widthIn, unsigned int heightIn) : width(widthIn), height(heightIn) {
+	glGenFramebuffers(1, &FBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, FBO);
+
+	glGenTextures(2, textureIDs);
+	for (int i = 0; i < 2; i++) {
+		glBindTexture(GL_TEXTURE_2D, textureIDs[i]);
+
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, NULL);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+		// 绑定 2 个颜色空间
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, textureIDs[i], 0);
+	}
+	
+	glGenRenderbuffers(1, &RBO);
+	glBindRenderbuffer(GL_RENDERBUFFER, RBO);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, width, height);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, RBO);
+	
+	// 设置输出  GL_COLOR_ATTACHMENT0 & GL_COLOR_ATTACHMENT1 颜色空间
+	unsigned int attachments[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+	glDrawBuffers(2, attachments);
+
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+		std::cout << "Framebuffer not complete!" << std::endl;
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+```
+
+使用 PingongBuffer 配合两步高斯模糊优化性能:
 
 
-# PBR - Physically Based Rendering
+```
+bool horizontal = true;
+bool firstIteration = true;
+unsigned int amount = 5;
+
+blurShader.use();
+blurShader.setInt("u_Image", 0);
+for (int i = 0; i < amount; i++) {
+	glBindFramebuffer(GL_FRAMEBUFFER, blurPingpongBuffer.FBO[horizontal]); // 输出图像
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, firstIteration ? bloomBuffer.textureIDs[1] : blurPingpongBuffer.textureIDs[!horizontal]); // 输入图像
+
+	blurShader.setInt("u_Horizontal", horizontal);
+
+	quad.Draw();
+
+	horizontal = !horizontal;
+
+	if (firstIteration) {
+		firstIteration = false;
+	}
+}
+glBindFramebuffer(GL_FRAMEBUFFER, 0);
+```
+
+混合泛光和HDR： (HDR + bloom) => tone mapping => gamma correction
+
+```
+void main() {
+    // o_FragColor = texture(u_DiffuseMap, v_TexCoords);
+
+    vec3 diffuseColor = texture(u_DiffuseMap, v_TexCoords).rgb;
+    vec3 bloomColor = texture(u_BloomMap, v_TexCoords).rgb;
+
+    // 1. combine
+    if (u_Bloom) {
+        diffuseColor += bloomColor;
+    }
+
+    // 2. tone mapping
+    diffuseColor = 1 - exp(-diffuseColor * u_Exposure);
+
+    // 3. gamma correction
+    float gamma = 2.2;
+    diffuseColor = pow(diffuseColor, vec3(1.0 / gamma));
+
+    o_FragColor = vec4(diffuseColor, 1.0);
+}
+
+```
+
+## 延迟渲染
+
+正向渲染最大的浪费在于overdraw, 一个渲染像素上前后叠了多层片元都需要执行光照计算，但是最后深度测试只保留最前面的第一个, 其他深度的片元计算都被浪费掉了。
+
+延迟渲染的几何pass同样要为所有的片元进行采样贴图和MRT,昂贵的光照计算被移动到光照pass, 在光照pass中只需要处理通过深度测试的片段。
+
+![overdraw](resources/overdraw.png)
+
+
+正向渲染与延迟渲染相结合：
+
+```
+// 1. 延迟渲染
+...
+
+// 2. 将GBuffers 深度数据拷贝到默认帧缓冲
+glBindFramebuffer(GL_READ_FRAMEBUFFER, gBuffer.FBO);
+glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0); // 写到默认的帧缓冲
+glBlitFramebuffer(0, 0, SCR_WIDTH, SCR_HEIGHT, 0, 0, SCR_WIDTH, SCR_HEIGHT, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+// 3. 正向渲染
+...
+```
+
+光源体积:
+
+根据光源衰减公式计算光源能照射到的有效区域就是光源体积。
+
+光源衰减公式：
+
+$$
+	F_{att} = \frac {1.0} {K_c + K_l * d + K_q * d^2}
+$$
+
+当衰减阈值 $F_{att}$ 设置为 $\frac{5}{256}$ 时，计算得到的光锥半径为:
+
+$$
+	d = \frac {-K_l + \sqrt {K_l^2- 4 * K_q * (K_c - I_{max} * \frac {256} {5})}} {2K_q}
+$$
+
+代码如下：
+
+```
+GLfloat constant  = 1.0; 
+GLfloat linear    = 0.7;
+GLfloat quadratic = 1.8;
+GLfloat lightMax  = std::fmaxf(std::fmaxf(lightColor.r, lightColor.g), lightColor.b);
+GLfloat radius    = (-linear +  std::sqrtf(linear * linear - 4 * quadratic * (constant - (256.0 / 5.0) * lightMax))) / (2 * quadratic);
+```
+``` shader.fs
+void main()
+{
+    [...]
+    for(int i = 0; i < NR_LIGHTS; ++i)
+    {
+        // 计算光源和该片段间距离
+        float distance = length(lights[i].Position - FragPos);
+
+		// 距离小于光锥半径
+        if(distance < lights[i].Radius)
+        {
+            // 执行大开销光照
+            [...]
+        }
+    }   
+}
+```
+
+延迟渲染的优缺点:
+
+1. 渲染大量光源的场景时，可以提升效率。
+2. 大内存开销，没有混色和 MSAA 抗锯齿。
+
+Q: 为什么延迟渲染不能混色？
+
+延迟渲染的整体逻辑建议的基础是: 一个像素对应一个平面，深度测试只会保留最前面的像素;  
+混色需要的颜色纹理必须经过光照后才能得到最终颜色，混色必须再光照之后。
+
+## SSAO
+
+

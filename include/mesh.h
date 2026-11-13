@@ -17,6 +17,9 @@ struct Vertex
     glm::vec3 position;
     glm::vec3 normal;
     glm::vec2 texCoords;
+
+    glm::vec3 tangent;
+    glm::vec3 bitangent;
 };
 
 // 注意：Texture 中的 id 只是对 GPU 纹理对象的引用。
@@ -130,6 +133,12 @@ private:
         glEnableVertexAttribArray(2);
         glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex),
                               reinterpret_cast<const void*>(offsetof(Vertex, texCoords)));
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), 
+                              reinterpret_cast<const void*>(offsetof(Vertex, tangent)));
+        glEnableVertexAttribArray(4);
+        glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), 
+                              reinterpret_cast<const void*>(offsetof(Vertex, bitangent)));
 
         glBindVertexArray(0);
     }

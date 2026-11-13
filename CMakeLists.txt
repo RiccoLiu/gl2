@@ -35,6 +35,11 @@ add_subdirectory(src/3.model_loading/1.model_loading)
 add_subdirectory(src/5.advanced_lighting/1.advanced_lighting)
 add_subdirectory(src/5.advanced_lighting/2.gamma_correction)
 add_subdirectory(src/5.advanced_lighting/3.1.shadow_mapping_depth)
+add_subdirectory(src/5.advanced_lighting/3.2.point_shadows)
+add_subdirectory(src/5.advanced_lighting/4.1.normal_mapping)
+add_subdirectory(src/5.advanced_lighting/6.1.hdr)
+add_subdirectory(src/5.advanced_lighting/7.1.bloom)
+add_subdirectory(src/5.advanced_lighting/8.1.defered_shading)
 
 add_custom_target(copy_resources ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
