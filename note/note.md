@@ -1423,7 +1423,8 @@ sRGB纹理:
 纹理的编辑者默认使用sRGB颜色空间，保存的图片已经进行过Gamma校正编码(提亮), 如果直接使用会与真实值不一致，所以需要将纹理从sRGB空间转换到线性空间进行Gamma解码。
 
 ```
-// Gamma解码: 会将 纹理从SRGB空间转换到线性空间, 渲染时需要重新进行Gamma校正
+// Gamma解码: 会将 纹理从SRGB空间转换到线性空间, 渲染时需要重新进行Gamma校正, 
+// Gamma解码: pow(fragColor.rgb, vec3(gamma));
 glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, image);
 ```
 

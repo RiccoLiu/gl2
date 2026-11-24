@@ -40,6 +40,7 @@ add_subdirectory(src/5.advanced_lighting/4.1.normal_mapping)
 add_subdirectory(src/5.advanced_lighting/6.1.hdr)
 add_subdirectory(src/5.advanced_lighting/7.1.bloom)
 add_subdirectory(src/5.advanced_lighting/8.1.defered_shading)
+add_subdirectory(src/6.pbr/1.1.lighting_textured)
 
 add_custom_target(copy_resources ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
